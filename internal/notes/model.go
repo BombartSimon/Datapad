@@ -37,16 +37,21 @@ func NewNote(title string) *Note {
 	}
 }
 
-// AddImage adds a new image to the note
-func (n *Note) AddImage(path, caption, altText string) {
-	image := Image{
-		ID:       generateID(),
-		Path:     path,
-		Caption:  caption,
-		AltText:  altText,
-		Position: len(n.Images),
+// AddImage adds an image to a note
+func (n *Note) AddImage(path string, caption string, altText string) {
+	// Ensure the Images slice is initialized
+	if n.Images == nil {
+		n.Images = []Image{}
 	}
-	n.Images = append(n.Images, image)
+
+	// Add the image to the note
+	n.Images = append(n.Images, Image{
+		Path:    path,
+		Caption: caption,
+		AltText: altText,
+	})
+
+	// Update the modification timestamp
 	n.UpdatedAt = time.Now()
 }
 

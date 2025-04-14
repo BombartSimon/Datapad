@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -132,7 +133,17 @@ func (m *NotesManager) FilterByTags(tags []string) []*Note {
 func (m *NotesManager) ImportImage(noteID string, sourcePath, caption, altText string) error {
 	note, err := m.GetNoteByID(noteID)
 	if err != nil {
-		return err
+		return fmt.Errorf("note not found: %w", err)
+	}
+
+	// Verify the image exists
+	if _, err := os.Stat(sourcePath); os.IsNotExist(err) {
+		return fmt.Errorf("image file not found at path: %s", sourcePath)
+	}
+
+	// Create the images directory if it doesn't exist
+	if err := os.MkdirAll(m.ImageDir, 0755); err != nil {
+		return fmt.Errorf("failed to create images directory: %w", err)
 	}
 
 	// Generate a unique name for the image
@@ -140,26 +151,21 @@ func (m *NotesManager) ImportImage(noteID string, sourcePath, caption, altText s
 	newFilename := fmt.Sprintf("%s%s", generateID(), ext)
 	destPath := filepath.Join(m.ImageDir, newFilename)
 
-	// Copy the image file
+	// Simple file copy using io.Copy
 	source, err := os.Open(sourcePath)
 	if err != nil {
-		return fmt.Errorf("unable to open source image: %w", err)
+		return fmt.Errorf("failed to open source image: %w", err)
 	}
 	defer source.Close()
 
 	destination, err := os.Create(destPath)
 	if err != nil {
-		return fmt.Errorf("unable to create destination file: %w", err)
+		return fmt.Errorf("failed to create destination file: %w", err)
 	}
 	defer destination.Close()
 
-	data, err := os.ReadFile(sourcePath)
-	if err != nil {
-		return fmt.Errorf("unable to read source image: %w", err)
-	}
-
-	if _, err := destination.Write(data); err != nil {
-		return fmt.Errorf("unable to write image: %w", err)
+	if _, err := io.Copy(destination, source); err != nil {
+		return fmt.Errorf("failed to copy image: %w", err)
 	}
 
 	// Add image to the note
@@ -167,6 +173,18 @@ func (m *NotesManager) ImportImage(noteID string, sourcePath, caption, altText s
 	m.UpdateNote(note)
 
 	return nil
+}
+
+// GetImageFullPath returns the full path to an image file
+func (m *NotesManager) GetImageFullPath(imagePath string) string {
+	return filepath.Join(m.ImageDir, imagePath)
+}
+
+// ImageExists checks if the image file exists
+func (m *NotesManager) ImageExists(imagePath string) bool {
+	fullPath := m.GetImageFullPath(imagePath)
+	_, err := os.Stat(fullPath)
+	return err == nil
 }
 
 // SaveNotes saves all notes to a JSON file

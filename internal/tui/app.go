@@ -3,7 +3,9 @@ package tui
 import (
 	"datapad/internal/notes"
 	"fmt"
+	"os/exec"
 	"regexp"
+	"runtime"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/help"
@@ -29,6 +31,7 @@ const (
 	ModeHelp
 	ModeAddTag
 	ModeFilterByTag
+	ModeViewImage // New mode for viewing images
 )
 
 // KeyMap defines the shortcut keys for the application
@@ -48,6 +51,10 @@ type KeyMap struct {
 	AddTag        key.Binding
 	FilterByTag   key.Binding
 	TogglePreview key.Binding
+	ViewImage     key.Binding
+	NextImage     key.Binding
+	PrevImage     key.Binding
+	OpenImage     key.Binding // Nouveau raccourci pour ouvrir directement l'image
 }
 
 // DefaultKeyMap returns the default key mapping
@@ -110,8 +117,24 @@ func DefaultKeyMap() KeyMap {
 			key.WithHelp("f", "filter by tag"),
 		),
 		TogglePreview: key.NewBinding(
-			key.WithKeys("p"),
-			key.WithHelp("p", "toggle preview"),
+			key.WithKeys("ctrl+p"),
+			key.WithHelp("ctrl+p", "toggle preview"),
+		),
+		ViewImage: key.NewBinding(
+			key.WithKeys("v"),
+			key.WithHelp("v", "voir l'image"),
+		),
+		NextImage: key.NewBinding(
+			key.WithKeys("right", "l"),
+			key.WithHelp("→/l", "image suivante"),
+		),
+		PrevImage: key.NewBinding(
+			key.WithKeys("left", "h"),
+			key.WithHelp("←/h", "image précédente"),
+		),
+		OpenImage: key.NewBinding(
+			key.WithKeys("o"),
+			key.WithHelp("o", "ouvrir l'image"),
 		),
 	}
 }
@@ -128,6 +151,7 @@ type Model struct {
 	searchInput   textinput.Model
 	tagInput      textinput.Model
 	selectedNote  *notes.Note
+	selectedImage int // Index of the currently selected image
 	keys          KeyMap
 	help          help.Model
 	showPreview   bool
@@ -282,6 +306,99 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		// Handle keys based on mode
 		switch m.mode {
+		case ModeViewImage:
+			if key.Matches(msg, m.keys.Back) {
+				m.mode = ModeView
+				return m, nil
+			} else if key.Matches(msg, m.keys.NextImage) {
+				// Move to next image
+				validImages := 0
+				for _, img := range m.selectedNote.Images {
+					if m.notesManager.ImageExists(img.Path) {
+						validImages++
+					}
+				}
+
+				if validImages > 1 {
+					// Find the next valid image
+					nextIndex := m.selectedImage
+					for {
+						nextIndex = (nextIndex + 1) % len(m.selectedNote.Images)
+						if m.notesManager.ImageExists(m.selectedNote.Images[nextIndex].Path) {
+							break
+						}
+						// Avoid infinite loop if there's only one valid image
+						if nextIndex == m.selectedImage {
+							break
+						}
+					}
+					m.selectedImage = nextIndex
+				}
+				return m, nil
+			} else if key.Matches(msg, m.keys.PrevImage) {
+				// Move to previous image
+				validImages := 0
+				for _, img := range m.selectedNote.Images {
+					if m.notesManager.ImageExists(img.Path) {
+						validImages++
+					}
+				}
+
+				if validImages > 1 {
+					// Find the previous valid image
+					prevIndex := m.selectedImage
+					for {
+						prevIndex = (prevIndex - 1 + len(m.selectedNote.Images)) % len(m.selectedNote.Images)
+						if m.notesManager.ImageExists(m.selectedNote.Images[prevIndex].Path) {
+							break
+						}
+						// Avoid infinite loop if there's only one valid image
+						if prevIndex == m.selectedImage {
+							break
+						}
+					}
+					m.selectedImage = prevIndex
+				}
+				return m, nil
+			} else if key.Matches(msg, m.keys.OpenImage) {
+				// Ouvrir l'image avec le visualiseur par défaut du système
+				img := m.selectedNote.Images[m.selectedImage]
+				imagePath := m.notesManager.GetImageFullPath(img.Path)
+
+				// Choisir la commande appropriée selon le système d'exploitation
+				var cmd *exec.Cmd
+				switch runtime.GOOS {
+				case "darwin":
+					cmd = exec.Command("open", imagePath)
+				case "windows":
+					cmd = exec.Command("cmd", "/c", "start", imagePath)
+				default:
+					// Sous Linux, essayer plusieurs commandes en ordre de préférence
+					if _, err := exec.LookPath("xdg-open"); err == nil {
+						cmd = exec.Command("xdg-open", imagePath)
+					} else if _, err := exec.LookPath("gio"); err == nil {
+						cmd = exec.Command("gio", "open", imagePath)
+					} else if _, err := exec.LookPath("gnome-open"); err == nil {
+						cmd = exec.Command("gnome-open", imagePath)
+					} else if _, err := exec.LookPath("kde-open"); err == nil {
+						cmd = exec.Command("kde-open", imagePath)
+					} else {
+						// Utiliser display d'ImageMagick en dernier recours
+						cmd = exec.Command("display", imagePath)
+					}
+				}
+
+				// Exécuter la commande en arrière-plan
+				err := cmd.Start()
+				if err != nil {
+					m.statusMsg = fmt.Sprintf("Erreur lors de l'ouverture de l'image: %s", err)
+				} else {
+					m.statusMsg = "Image ouverte dans le visualiseur par défaut"
+				}
+				return m, nil
+			}
+			return m, nil
+
 		case ModeAddTag:
 			if key.Matches(msg, m.keys.Back) {
 				m.mode = ModeView
@@ -539,6 +656,31 @@ func (m Model) updateViewMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.tagInput.Reset()
 		m.tagInput.Focus()
 		return m, nil
+
+	case key.Matches(msg, m.keys.ViewImage):
+		// Check if the note has any images
+		if len(m.selectedNote.Images) > 0 {
+			// Find the first valid image
+			validImageFound := false
+			for i, img := range m.selectedNote.Images {
+				if m.notesManager.ImageExists(img.Path) {
+					m.selectedImage = i
+					validImageFound = true
+					break
+				}
+			}
+
+			if validImageFound {
+				m.mode = ModeViewImage
+				m.statusMsg = "Appuyez sur Échap pour revenir à la note, ←/→ pour naviguer entre les images"
+				return m, nil
+			} else {
+				m.statusMsg = "Aucune image valide à afficher"
+			}
+		} else {
+			m.statusMsg = "Cette note ne contient pas d'images"
+		}
+		return m, nil
 	}
 
 	return m, nil
@@ -595,6 +737,9 @@ func (m Model) View() string {
 	case ModeView:
 		return m.viewNote()
 
+	case ModeViewImage:
+		return m.viewImage()
+
 	case ModeEdit, ModeNew:
 		return m.viewEditor()
 
@@ -608,17 +753,7 @@ func (m Model) View() string {
 		)
 
 	case ModeAddImage:
-		return lipgloss.JoinVertical(
-			lipgloss.Left,
-			"Add an image:",
-			"Image path:",
-			m.imagePath.View(),
-			"Caption (optional):",
-			m.imageCaption.View(),
-			m.statusBar(),
-			"Press Enter to add, Esc to cancel",
-			"",
-		)
+		return m.modeAddImage()
 
 	case ModeAddTag:
 		return lipgloss.JoinVertical(
@@ -641,6 +776,29 @@ func (m Model) View() string {
 	default:
 		return "Unknown mode"
 	}
+}
+
+// modeAddImage displays the image import form
+func (m Model) modeAddImage() string {
+	helpStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#888888"))
+	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FFA500"))
+
+	return lipgloss.JoinVertical(
+		lipgloss.Left,
+		titleStyle.Render("📷 Ajouter une image à la note"),
+		"",
+		"Chemin de l'image (chemin complet vers le fichier) :",
+		m.imagePath.View(),
+		helpStyle.Render("Exemple: /home/user/images/photo.jpg"),
+		"",
+		"Légende (optionnelle) :",
+		m.imageCaption.View(),
+		"",
+		helpStyle.Render("Utilisez Tab pour naviguer entre les champs"),
+		helpStyle.Render("Entrée pour confirmer, Échap pour annuler"),
+		"",
+		m.statusBar(),
+	)
 }
 
 // viewNote displays a note in view mode
@@ -666,6 +824,12 @@ func (m Model) viewNote() string {
 	tagsStyle := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("#5f5"))
 
+	imageStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#3498db"))
+
+	warningStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#ff7700"))
+
 	title := titleStyle.Render(m.selectedNote.Title)
 	content := contentStyle.Render(m.selectedNote.Content)
 	created := metadataStyle.Render(fmt.Sprintf("Created on: %s", m.selectedNote.CreatedAt.Format("02/01/2006 15:04")))
@@ -678,13 +842,26 @@ func (m Model) viewNote() string {
 
 	imagesSection := ""
 	if len(m.selectedNote.Images) > 0 {
-		imagesSection = "Images:\n"
-		for _, img := range m.selectedNote.Images {
+		imagesSection = imageStyle.Render("📷 Images attachées:\n")
+		validImagesCount := 0
+
+		for i, img := range m.selectedNote.Images {
 			caption := img.Caption
 			if caption == "" {
-				caption = "(no caption)"
+				caption = "(aucune légende)"
 			}
-			imagesSection += fmt.Sprintf("- %s: %s\n", img.Path, caption)
+
+			// Vérifier si l'image existe toujours
+			if m.notesManager.ImageExists(img.Path) {
+				imagesSection += imageStyle.Render(fmt.Sprintf("%d. %s: %s\n", i+1, img.Path, caption))
+				validImagesCount++
+			} else {
+				imagesSection += warningStyle.Render(fmt.Sprintf("%d. %s: %s (fichier manquant)\n", i+1, img.Path, caption))
+			}
+		}
+
+		if validImagesCount == 0 && len(m.selectedNote.Images) > 0 {
+			imagesSection += warningStyle.Render("⚠️ Aucune image n'a pu être trouvée. Les fichiers ont peut-être été déplacés ou supprimés.\n")
 		}
 	}
 
@@ -757,7 +934,7 @@ func (m Model) viewEditor() string {
 			lipgloss.Left,
 			content,
 			m.statusBar(),
-			"Ctrl+S to save, Esc to cancel, P to toggle preview",
+			"Ctrl+S to save, Esc to cancel, Ctrl+P to toggle preview",
 		)
 	}
 
@@ -770,7 +947,7 @@ func (m Model) viewEditor() string {
 		"Content:",
 		m.textArea.View(),
 		m.statusBar(),
-		"Ctrl+S to save, Esc to cancel, P for preview",
+		"Ctrl+S to save, Esc to cancel, Ctrl+P for preview",
 	)
 }
 
@@ -880,11 +1057,93 @@ func (m Model) renderMarkdown(content string) string {
 	return html
 }
 
+// viewImage displays an image in view mode
+func (m Model) viewImage() string {
+	if m.selectedNote == nil || len(m.selectedNote.Images) == 0 || m.selectedImage < 0 || m.selectedImage >= len(m.selectedNote.Images) {
+		return "Aucune image à afficher"
+	}
+
+	img := m.selectedNote.Images[m.selectedImage]
+
+	// Verify the image exists
+	if !m.notesManager.ImageExists(img.Path) {
+		return lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("#ff0000")).
+			Render(fmt.Sprintf("❌ L'image '%s' n'existe pas ou a été déplacée", img.Path))
+	}
+
+	// Get the full path to the image
+	imagePath := m.notesManager.GetImageFullPath(img.Path)
+
+	// Create a title for the image
+	titleStyle := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(lipgloss.Color("#FFA500")).
+		PaddingBottom(1)
+
+	imageInfoStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#3498db"))
+
+	// Format image information
+	title := titleStyle.Render("📷 Image")
+	caption := img.Caption
+	if caption == "" {
+		caption = "(aucune légende)"
+	}
+
+	// Format image position information (e.g., "Image 2/5")
+	validImages := 0
+	for _, noteImg := range m.selectedNote.Images {
+		if m.notesManager.ImageExists(noteImg.Path) {
+			validImages++
+		}
+	}
+
+	// Find the index of this image among valid images
+	validIndex := 0
+	for i := 0; i <= m.selectedImage; i++ {
+		if m.notesManager.ImageExists(m.selectedNote.Images[i].Path) {
+			validIndex++
+		}
+	}
+
+	positionText := fmt.Sprintf("Image %d/%d", validIndex, validImages)
+
+	infoText := fmt.Sprintf("Fichier: %s\nLégende: %s", img.Path, caption)
+
+	// Indicate an external terminal command to view the image
+	viewCommandStyle := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(lipgloss.Color("#2ecc71"))
+
+	viewCommand := viewCommandStyle.Render(fmt.Sprintf("\n\nPour voir cette image, exécutez:\n$ xdg-open %s", imagePath))
+
+	// Help text for navigation
+	helpStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#888888"))
+
+	helpText := helpStyle.Render("\nUtilisez ←/→ pour naviguer entre les images, o pour ouvrir l'image, Échap pour revenir à la note")
+
+	// Join all sections
+	return lipgloss.JoinVertical(
+		lipgloss.Left,
+		title,
+		imageInfoStyle.Render(positionText),
+		imageInfoStyle.Render(infoText),
+		viewCommand,
+		helpText,
+		"",
+		m.statusBar(),
+	)
+}
+
 // statusBar displays the status bar at the bottom of the screen
 func (m Model) statusBar() string {
 	status := m.statusMsg
 	if status == "" {
 		status = "Ready"
+
 	}
 
 	return lipgloss.NewStyle().
@@ -914,6 +1173,15 @@ func (m Model) helpView() string {
 			m.keys.Delete,
 			m.keys.AddImage,
 			m.keys.AddTag,
+			m.keys.ViewImage,
+			m.keys.Quit,
+		})
+	case ModeViewImage:
+		return m.help.ShortHelpView([]key.Binding{
+			m.keys.Back,
+			m.keys.NextImage,
+			m.keys.PrevImage,
+			m.keys.OpenImage,
 			m.keys.Quit,
 		})
 	default:
